@@ -23,6 +23,30 @@ def five_node_graph_adj():
     return nx.adjacency_matrix(graph).T
 
 
+@pytest.fixture()
+def triplet_adj():
+    graph = nx.DiGraph()
+    graph.add_edge(0, 1)
+    graph.add_edge(1, 2)
+    graph.add_node(3)
+    graph.add_node(4)
+    graph.add_node(5)
+    return nx.adjacency_matrix(graph).T
+
+
+@pytest.fixture()
+def triplet_features():
+    features = np.asarray([
+        [1, 0],
+        [-1, -1],
+        [2, 2],
+        [0, 0],
+        [0, 0],
+        [0, 0]
+    ])
+    return features
+
+
 @pytest.mark.parametrize('use_weights', [True, False])
 def test_egonet_features(five_node_graph_adj, use_weights):
     ego_features = refex.extract_egonet_features(five_node_graph_adj, use_weights=use_weights)
@@ -50,3 +74,21 @@ def test_node_features(five_node_graph_adj, use_weights):
         assert np.allclose(node_features, answer)
     else:
         assert np.allclose(node_features, answer[:, :2])
+
+
+@pytest.mark.parametrize('tol', [-1, 0])
+def test_recursion(triplet_adj, triplet_features, tol):
+    features = refex.do_feature_recursion(triplet_features, triplet_adj, max_steps=1, tol=tol)
+    answer = np.asarray([
+        [1, 0, -1, -1, -1, -1],
+        [-1, -1, 1.5, 1, 3, 2],
+        [2, 2, -1, -1, -1, -1],
+        [0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0]
+    ])
+    answer[:, 2:] = answer[:, 2:] / np.linalg.norm(answer[:, 2:], axis=0)
+    if tol < 0:
+        assert np.allclose(features, answer)
+    else:
+        assert np.allclose(features, answer[:, :3])
