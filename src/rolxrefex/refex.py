@@ -89,7 +89,7 @@ def extract_egonet_features(adj, use_weights=True):
     return features
 
 
-def do_feature_recursion(features: np.ndarray, adj, max_steps: int, tol: float):
+def do_feature_recursion(features: np.ndarray, adj: sp.spmatrix, max_steps: int, tol: float):
     """ Enhance features through recursive aggregation using mean and sum of neighbour features.
     Features are only added if they are linearly independent of existing features.
     Args:
@@ -228,7 +228,7 @@ def _extract_egonet_features_no_weights(out_adj_dict: nb.typed.Dict, in_adj_dict
 
 
 @nb.jit(nb.float64[:, :](nb.float64[:, :], nb.types.DictType(nb.int64, nb.int64[:]), nb.int64, nb.float64),
-        nopython=True, nogil=True)
+        nopython=True, nogil=True, parallel=True)
 def _feature_recursion(features: np.ndarray, adj_dict: nb.typed.Dict, max_steps: int, tol: float):
     num_nodes = features.shape[0]
     for r in range(max_steps):
@@ -237,12 +237,12 @@ def _feature_recursion(features: np.ndarray, adj_dict: nb.typed.Dict, max_steps:
             break
         new_features = np.zeros((num_nodes, num_new_features))
 
-        for v in range(num_nodes):
+        for v in nb.prange(num_nodes):
             num_neigh = len(adj_dict[v])
             if num_neigh == 0:
                 continue
-            new_features[v, :] = np.concatenate((np.sum(features[adj_dict[v], :], axis=0) / num_neigh,
-                                                 np.sum(features[adj_dict[v], :], axis=0)))
+            new_features[v] = np.concatenate((np.sum(features[adj_dict[v], :], axis=0) / num_neigh,
+                                              np.sum(features[adj_dict[v], :], axis=0)))
         new_features = new_features / np.sqrt(np.sum(np.power(new_features, 2), axis=0))
 
         features = np.concatenate((features, new_features), axis=1)
