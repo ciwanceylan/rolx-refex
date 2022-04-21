@@ -3,44 +3,121 @@ import numba as nb
 import scipy.sparse as sp
 
 
-#
-# @nb.jit(nb.float64[:, :](nb.types.ListType(nb.float64[:])), nopython=True, nogil=True)
-# def mean_sum_agg(observations):
-#     res = np.zeros((1, 2 * observations.shape[1]))
-#
-#     for i, val in enumerate(observations):
-#         res[i, :] = np.asarray([np.mean(val, axis=0), np.sum(val, axis=0)])
-#     return res
-#
-#
-# @nb.jit(nb.float64[:, :](nb.types.ListType(nb.float64[:])), nopython=True, nogil=True)
-# def basic_stats_agg(observations):
-#     res = np.zeros((len(observations), 5))
-#
-#     for i, val in enumerate(observations):
-#         res[i, :] = np.asarray([np.mean(val), np.sum(val),
-#                                 np.min(val), np.max(val),
-#                                 np.std(val)]
-#                                )
-#     return res
-#
-#
-# @nb.jit(nb.float64[:, :](nb.types.ListType(nb.float64[:]), int), nopython=True, nogil=True)
-# def percentile_agg_nb(observations, num_features: int):
-#     q = np.linspace(0, 100, num_features)
-#     res = np.zeros((len(observations), num_features))
-#
-#     for i, val in enumerate(observations):
-#         res[i, :] = np.percentile(val, q=q, axis=0)
-#     return res
-
 def refex(adj: sp.spmatrix, use_weights=True, max_steps=5, prune_tol=0.0001):
+    """ Computes ReFeX features.
+    Feature pruning uses QR factorisation and removes feature columns for which the diagonal element of R is smaller
+    than `prune_tol * diag(R).max()`.
+
+    Args:
+        adj: Weighted adjacency matrix with A[i,j] indicating an edge j -> i. Assumes non-negative weights.
+        use_weights: Append features using weights
+        max_steps: Maximum number of recursion steps.
+        prune_tol: The feature pruning tolerance.
+    Returns:
+        features: Matrix of features. [n x 10] if use_weights, else  [n x 5]
+    """
     base_features = extract_base_features(adj, use_weights=use_weights)
     features = do_feature_recursion(base_features, adj, max_steps=max_steps, tol=prune_tol)
     return features
 
 
-def adj2adj_dict(adj, return_weights=False, use_in_degrees=False, as_numba_dict=False):
+def extract_base_features(adj: sp.spmatrix, use_weights=True):
+    """ Extract node and egonet features for each node in the graph.
+
+    Args:
+        adj: Adjacency matrix with A[i,j] indicating an edge j -> i
+        use_weights: Append features using weights
+    Returns:
+        features: Matrix of features. [n x 10] if use_weights, else  [n x 5]
+    """
+    node_feat = extract_node_features(adj, use_weights=use_weights)
+    ego_feat = extract_egonet_features(adj, use_weights=use_weights)
+
+    return np.concatenate((node_feat, ego_feat), axis=1)
+
+
+def extract_node_features(adj: sp.spmatrix, use_weights=True):
+    """ Extract node features for each node in the graph. Node features are in and out degrees, and their weighted
+    counterparts is `use_weights`.
+
+    Args:
+        adj: Adjacency matrix with A[i,j] indicating an edge j -> i
+        use_weights: Append weighted node degrees
+    Returns:
+        features: Matrix of node features. [n x 4] if use_weights, else  [n x 2]
+    """
+    num_nodes = adj.shape[0]
+    nz_row, nz_col = adj.nonzero()
+
+    out_degrees_index, out_degrees_ = np.unique(nz_col, return_counts=True)
+    out_degrees = np.zeros(num_nodes, dtype=np.float64)
+    out_degrees[out_degrees_index] = out_degrees_
+
+    in_degrees_index, in_degrees_ = np.unique(nz_row, return_counts=True)
+    in_degrees = np.zeros(num_nodes, dtype=np.float64)
+    in_degrees[in_degrees_index] = in_degrees_
+
+    if use_weights:
+        out_sum_weight = adj.sum(axis=0).A1
+        in_sum_weight = adj.sum(axis=1).A1
+        features = np.stack((out_degrees, in_degrees, out_sum_weight, in_sum_weight), axis=1)
+    else:
+        features = np.stack((out_degrees, in_degrees), axis=1)
+    return features
+
+
+def extract_egonet_features(adj, use_weights=True):
+    """ Extract egonet features for each node in the network.
+    The egonet features are the number of edges in the egonet and the number of incoming and outgoing edges of the
+    egonet. Sum of weights are used if `use_weights` is `True`.
+
+
+    Args:
+        adj: Adjacency matrix with A[i,j] indicating an edge j -> i
+        use_weights: Append weighted egonet features.
+
+    Returns:
+        features: Egonet features. [n x 6] if use_weights else [n x 3]
+    """
+    out_adj_dict, out_weights = adj2adj_dict(adj, return_weights=use_weights, as_numba_dict=True)
+    in_adj_dict, in_weights = adj2adj_dict(adj, use_in_degrees=use_weights, return_weights=True, as_numba_dict=True)
+
+    if use_weights:
+        features = _extract_egonet_features(out_adj_dict, in_adj_dict, out_weights, in_weights)
+    else:
+        features = _extract_egonet_features_no_weights(out_adj_dict, in_adj_dict)
+    return features
+
+
+def do_feature_recursion(features: np.ndarray, adj, max_steps: int, tol: float):
+    """ Enhance features through recursive aggregation using mean and sum of neighbour features.
+    Features are only added if they are linearly independent of existing features.
+    Args:
+        features: Base features to enhance
+        adj: Adjacency matrix with A[i,j] indicating an edge j -> i
+        max_steps: The maximum number of recursion steps
+        tol: Tolerance for adding new features
+
+    Returns:
+        features: Matrix of enhanced features, [n x *]
+    """
+    adj_dict, _ = adj2adj_dict(adj.maximum(adj.T), as_numba_dict=True)
+    return _feature_recursion(features, adj_dict, max_steps, tol)
+
+
+def adj2adj_dict(adj: sp.spmatrix, return_weights=False, use_in_degrees=False, as_numba_dict=False):
+    """ Get a adjacency dictionary representation of the graph defined by adj.
+
+    Args:
+        adj: Adjacency matrix with A[i,j] indicating an edge j -> i
+        return_weights: Return a dictionary of the weights associated with each edge.
+        use_in_degrees: Create the adjacency dict using incoming edges instead of outgoing.
+        as_numba_dict: Create a numba Dict which can be used with nopython numba functions.
+
+    Returns:
+        targets: Dict of adjacent nodes for each node in the graph
+        weights: Dict of edge weights for adjacent node. None if return_weights=False.
+    """
     num_nodes = adj.shape[0]
     if use_in_degrees:
         adj = adj.tocsr()
@@ -69,45 +146,6 @@ def adj2adj_dict(adj, return_weights=False, use_in_degrees=False, as_numba_dict=
     else:
         weights = None
     return targets, weights
-
-
-def extract_base_features(adj: sp.spmatrix, use_weights=True):
-    node_feat = extract_node_features(adj, use_weights=use_weights)
-    ego_feat = extract_egonet_features(adj, use_weights=use_weights)
-
-    return np.concatenate((node_feat, ego_feat), axis=1)
-
-
-def extract_node_features(adj: sp.spmatrix, use_weights=True):
-    num_nodes = adj.shape[0]
-    nz_row, nz_col = adj.nonzero()
-
-    out_degrees_index, out_degrees_ = np.unique(nz_col, return_counts=True)
-    out_degrees = np.zeros(num_nodes, dtype=np.float64)
-    out_degrees[out_degrees_index] = out_degrees_
-
-    in_degrees_index, in_degrees_ = np.unique(nz_row, return_counts=True)
-    in_degrees = np.zeros(num_nodes, dtype=np.float64)
-    in_degrees[in_degrees_index] = in_degrees_
-
-    if use_weights:
-        out_sum_weight = adj.sum(axis=0).A1
-        in_sum_weight = adj.sum(axis=1).A1
-        features = np.stack((out_degrees, in_degrees, out_sum_weight, in_sum_weight), axis=1)
-    else:
-        features = np.stack((out_degrees, in_degrees), axis=1)
-    return features
-
-
-def extract_egonet_features(adj, use_weights=True):
-    out_adj_dict, out_weights = adj2adj_dict(adj, return_weights=use_weights, as_numba_dict=True)
-    in_adj_dict, in_weights = adj2adj_dict(adj, use_in_degrees=use_weights, return_weights=True, as_numba_dict=True)
-
-    if use_weights:
-        features = _extract_egonet_features(out_adj_dict, in_adj_dict, out_weights, in_weights)
-    else:
-        features = _extract_egonet_features_no_weights(out_adj_dict, in_adj_dict)
-    return features
 
 
 @nb.jit(nb.float64[:, :](nb.types.DictType(nb.int64, nb.int64[:]), nb.types.DictType(nb.int64, nb.int64[:]),
@@ -216,8 +254,3 @@ def _feature_recursion(features: np.ndarray, adj_dict: nb.typed.Dict, max_steps:
         features = features[:, keep_columns]
 
     return features
-
-
-def do_feature_recursion(features: np.ndarray, adj, max_steps: int, tol: float):
-    adj_dict, _ = adj2adj_dict(adj.maximum(adj.T), as_numba_dict=True)
-    return _feature_recursion(features, adj_dict, max_steps, tol)
