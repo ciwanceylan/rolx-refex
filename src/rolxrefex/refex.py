@@ -102,7 +102,7 @@ def do_feature_recursion(features: np.ndarray, adj, max_steps: int, tol: float):
         features: Matrix of enhanced features, [n x *]
     """
     adj_dict, _ = adj2adj_dict(adj.maximum(adj.T), as_numba_dict=True)
-    return _feature_recursion(features, adj_dict, max_steps, tol)
+    return _feature_recursion(features.astype(np.float64), adj_dict, max_steps, tol)
 
 
 def adj2adj_dict(adj: sp.spmatrix, return_weights=False, use_in_degrees=False, as_numba_dict=False):
