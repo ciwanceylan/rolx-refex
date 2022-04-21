@@ -80,7 +80,7 @@ def extract_egonet_features(adj, use_weights=True):
         features: Egonet features. [n x 6] if use_weights else [n x 3]
     """
     out_adj_dict, out_weights = adj2adj_dict(adj, return_weights=use_weights, as_numba_dict=True)
-    in_adj_dict, in_weights = adj2adj_dict(adj, use_in_degrees=use_weights, return_weights=True, as_numba_dict=True)
+    in_adj_dict, in_weights = adj2adj_dict(adj, use_in_degrees=True, return_weights=use_weights, as_numba_dict=True)
 
     if use_weights:
         features = _extract_egonet_features(out_adj_dict, in_adj_dict, out_weights, in_weights)
@@ -199,7 +199,7 @@ def _extract_egonet_features(out_adj_dict: nb.typed.Dict, in_adj_dict: nb.typed.
 def _extract_egonet_features_no_weights(out_adj_dict: nb.typed.Dict, in_adj_dict: nb.typed.Dict):
     num_nodes = len(out_adj_dict)
 
-    features = np.zeros((num_nodes, 6), dtype=np.float64)
+    features = np.zeros((num_nodes, 3), dtype=np.float64)
 
     for v in range(num_nodes):
         egonet = set(np.unique(np.concatenate((out_adj_dict[v], in_adj_dict[v]))))
