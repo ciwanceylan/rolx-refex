@@ -47,6 +47,12 @@ def triplet_features():
     return features
 
 
+@pytest.fixture()
+def large_adj():
+    graph = nx.fast_gnp_random_graph(1000, 0.01)
+    return nx.adjacency_matrix(graph).T
+
+
 @pytest.mark.parametrize('use_weights', [True, False])
 def test_egonet_features(five_node_graph_adj, use_weights):
     ego_features = refex.extract_egonet_features(five_node_graph_adj, use_weights=use_weights)
@@ -92,3 +98,16 @@ def test_recursion(triplet_adj, triplet_features, tol):
         assert np.allclose(features, answer)
     else:
         assert np.allclose(features, answer[:, :3])
+
+
+@pytest.mark.parametrize('tol', [-1, 0.001, 1.])
+def test_refex(large_adj, tol):
+    features = refex.refex(large_adj, max_emb_size=50, use_weights=False, prune_tol=tol)
+
+    if tol < 0:
+        assert features.shape[0] == 1000
+        assert features.shape[1] == 45
+    else:
+        assert features.shape[0] == 1000
+        assert features.shape[1] <= 45
+        assert features.shape[1] >= 5
