@@ -3,20 +3,22 @@ import numba as nb
 import scipy.sparse as sp
 
 
-def refex(adj: sp.spmatrix, use_weights=True, max_steps=5, prune_tol=0.0001):
+def refex(adj: sp.spmatrix, max_emb_size: int, use_weights=True, prune_tol=0.0001):
     """ Computes ReFeX features.
     Feature pruning uses QR factorisation and removes feature columns for which the diagonal element of R is smaller
     than `prune_tol * diag(R).max()`.
 
     Args:
         adj: Weighted adjacency matrix with A[i,j] indicating an edge j -> i. Assumes non-negative weights.
+        max_emb_size: Maximum size of refex embeddings. Used to calculate max recursion steps.
         use_weights: Append features using weights
-        max_steps: Maximum number of recursion steps.
         prune_tol: The feature pruning tolerance.
     Returns:
         features: Matrix of features. [n x 10] if use_weights, else  [n x 5]
     """
     base_features = extract_base_features(adj, use_weights=use_weights)
+    num_base_features = base_features.shape[1]
+    max_steps = int(np.log2(1 + (float(max_emb_size) / num_base_features))) - 1
     features = do_feature_recursion(base_features, adj, max_steps=max_steps, tol=prune_tol)
     return features
 
