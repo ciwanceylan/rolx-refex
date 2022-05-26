@@ -1,6 +1,7 @@
 import pytest
 import networkx as nx
 import numpy as np
+import tempfile
 
 import rolxrefex.refex as refex
 
@@ -84,7 +85,7 @@ def test_node_features(five_node_graph_adj, use_weights):
 
 @pytest.mark.parametrize('tol', [-1, 0])
 def test_recursion(triplet_adj, triplet_features, tol):
-    features = refex.do_feature_recursion(triplet_features, triplet_adj, max_steps=1, tol=tol)
+    features, _ = refex.do_feature_recursion(triplet_features, triplet_adj, max_steps=1, tol=tol)
     answer = np.asarray([
         [1, 0, -1, -1, -1, -1],
         [-1, -1, 1.5, 1, 3, 2],
@@ -100,9 +101,10 @@ def test_recursion(triplet_adj, triplet_features, tol):
         assert np.allclose(features, answer[:, :3])
 
 
-@pytest.mark.parametrize('tol', [-1, 0.001, 1.])
+@pytest.mark.parametrize('tol', [-1, 1e-10, 1e-6, 0.001, 1.])
 def test_refex(large_adj, tol):
-    features = refex.refex(large_adj, max_emb_size=50, use_weights=False, prune_tol=tol)
+    param = refex.RefexParam(max_emb_size=50, use_weights=False, prune_tol=tol)
+    features, reprod_param = refex.refex(large_adj, param)
 
     if tol < 0:
         assert features.shape[0] == 1000
@@ -111,3 +113,25 @@ def test_refex(large_adj, tol):
         assert features.shape[0] == 1000
         assert features.shape[1] <= 45
         assert features.shape[1] >= 5
+
+
+@pytest.mark.parametrize('tol', [-1, 1e-10, 1e-6, 0.001, 1.])
+def test_refex_reprod(large_adj, tol):
+    param = refex.RefexParam(max_emb_size=128, use_weights=False, prune_tol=tol)
+    features1, reprod_param = refex.refex(large_adj, param)
+    with tempfile.NamedTemporaryFile() as fp:
+        reprod_param.save(fp.name)
+        fp.seek(0)
+        param2 = refex.RefexParam.load(fp.name)
+
+    features2, reprod_param = refex.refex(large_adj, param2)
+
+    assert np.allclose(features1, features2)
+
+    # if tol < 0:
+    #     assert features.shape[0] == 1000
+    #     assert features.shape[1] == 45
+    # else:
+    #     assert features.shape[0] == 1000
+    #     assert features.shape[1] <= 45
+    #     assert features.shape[1] >= 5

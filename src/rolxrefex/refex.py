@@ -1,26 +1,68 @@
+import dataclasses as dc
+import json
 import numpy as np
 import numba as nb
 import scipy.sparse as sp
 
 
-def refex(adj: sp.spmatrix, max_emb_size: int, use_weights=True, prune_tol=0.0001):
+@dc.dataclass(frozen=True)
+class RefexParam:
+    """
+    Args:
+        max_emb_size: Maximum size of refex embeddings. Used to calculate max recursion steps.
+        use_weights: Append features using weights
+        prune_tol: The feature pruning tolerance.
+        columns2keep: Specification of which columns to keep in pruning step.
+            Needed for reproducing refex feature on new graphs after having run it on a 'training' graph.
+    """
+    max_emb_size: int
+    use_weights: bool
+    prune_tol: float = 1e-5
+    columns2keep: nb.types.DictType(nb.int64, nb.bool_[::1]) = None
+
+    def save(self, path):
+        data = dict(max_emb_size=self.max_emb_size, use_weights=self.use_weights, prune_tol=self.prune_tol)
+        data['columns2keep'] = {i: val.tolist() for i, val in self.columns2keep.items()}
+        with open(path, 'w') as fp:
+            json.dump(data, fp)
+
+    @classmethod
+    def load(cls, path):
+        with open(path, 'r') as fp:
+            data = json.load(fp)
+        columns2keep = nb.typed.Dict.empty(
+            key_type=nb.int64,
+            value_type=nb.bool_[::1],
+        )
+        for i, cols2keep in data['columns2keep'].items():
+            columns2keep[int(i)] = np.asarray(cols2keep, dtype=bool, order='C')
+        data['columns2keep'] = columns2keep
+        return cls(**data)
+
+
+def refex(adj: sp.spmatrix, param: RefexParam):
     """ Computes ReFeX features.
     Feature pruning uses QR factorisation and removes feature columns for which the diagonal element of R is smaller
     than `prune_tol * diag(R).max()`.
 
     Args:
         adj: Weighted adjacency matrix with A[i,j] indicating an edge j -> i. Assumes non-negative weights.
-        max_emb_size: Maximum size of refex embeddings. Used to calculate max recursion steps.
-        use_weights: Append features using weights
-        prune_tol: The feature pruning tolerance.
+        param: refex parameters as a RefexParam object
     Returns:
         features: Matrix of features. [n x 10] if use_weights, else  [n x 5]
     """
-    base_features = extract_base_features(adj, use_weights=use_weights)
+    base_features = extract_base_features(adj, use_weights=param.use_weights)
     num_base_features = base_features.shape[1]
-    max_steps = int(np.log2(1 + (float(max_emb_size) / num_base_features))) - 1
-    features = do_feature_recursion(base_features, adj, max_steps=max_steps, tol=prune_tol)
-    return features
+    max_steps = int(np.log2(1 + (float(param.max_emb_size) / num_base_features))) - 1
+
+    features, columns_keeped = do_feature_recursion(base_features, adj, max_steps=max_steps, tol=param.prune_tol,
+                                                    columns2keep=param.columns2keep)
+    reprod_param = RefexParam(max_emb_size=param.max_emb_size,
+                              use_weights=param.use_weights,
+                              prune_tol=param.prune_tol,
+                              columns2keep=columns_keeped)
+
+    return features, reprod_param
 
 
 def extract_base_features(adj: sp.spmatrix, use_weights=True):
@@ -91,7 +133,8 @@ def extract_egonet_features(adj, use_weights=True):
     return features
 
 
-def do_feature_recursion(features: np.ndarray, adj: sp.spmatrix, max_steps: int, tol: float):
+def do_feature_recursion(features: np.ndarray, adj: sp.spmatrix, max_steps: int, tol: float,
+                         columns2keep: nb.types.DictType(nb.int64, nb.bool_[::1]) = None):
     """ Enhance features through recursive aggregation using mean and sum of neighbour features.
     Features are only added if they are linearly independent of existing features.
     Args:
@@ -99,12 +142,17 @@ def do_feature_recursion(features: np.ndarray, adj: sp.spmatrix, max_steps: int,
         adj: Adjacency matrix with A[i,j] indicating an edge j -> i
         max_steps: The maximum number of recursion steps
         tol: Tolerance for adding new features
+        columns2keep:
 
     Returns:
         features: Matrix of enhanced features, [n x *]
     """
     adj_dict, _ = adj2adj_dict(adj.maximum(adj.T), as_numba_dict=True)
-    return _feature_recursion(features.astype(np.float64), adj_dict, max_steps, tol)
+    if columns2keep is None:
+        features, columns2keep = _feature_recursion(features.astype(np.float64), adj_dict, max_steps, tol)
+    else:
+        features = _repeat_feature_recursion(features.astype(np.float64), adj_dict, columns2keep)
+    return features, columns2keep
 
 
 def adj2adj_dict(adj: sp.spmatrix, return_weights=False, use_in_degrees=False, as_numba_dict=False):
@@ -229,11 +277,13 @@ def _extract_egonet_features_no_weights(out_adj_dict: nb.typed.Dict, in_adj_dict
     return features
 
 
-@nb.jit(nb.float64[:, :](nb.float64[:, :], nb.types.DictType(nb.int64, nb.int64[:]), nb.int64, nb.float64),
-        nopython=True, nogil=True, parallel=True)
+@nb.jit(nb.types.Tuple((nb.float64[:, :], nb.types.DictType(nb.int64, nb.bool_[::1])))(
+    nb.float64[:, :], nb.types.DictType(nb.int64, nb.int64[:]), nb.int64, nb.float64
+), nopython=True, nogil=True, parallel=True)
 def _feature_recursion(features: np.ndarray, adj_dict: nb.typed.Dict, max_steps: int, tol: float):
     num_nodes = features.shape[0]
-    for r in range(max_steps):
+    columns_to_keep = {}
+    for step in range(max_steps):
         num_new_features = 2 * features.shape[1]
         if features.shape[1] + num_new_features > num_nodes:
             break
@@ -252,7 +302,32 @@ def _feature_recursion(features: np.ndarray, adj_dict: nb.typed.Dict, max_steps:
         dependence_coeff = np.abs(np.diag(r))
         keep_columns = dependence_coeff > tol * dependence_coeff.max()
         if np.all(keep_columns[-num_new_features:] == 0):
-            break  # Break if no new features are added
-        features = features[:, keep_columns]
+            features = features[:, :-num_new_features]
+            break  # Break if no new features are added, keeping only the previous features
 
+        features = features[:, keep_columns]
+        columns_to_keep[step] = keep_columns
+    return features, columns_to_keep
+
+
+@nb.jit((nb.float64[:, :])(
+    nb.float64[:, :], nb.types.DictType(nb.int64, nb.int64[:]), nb.types.DictType(nb.int64, nb.bool_[::1])
+), nopython=True, nogil=True, parallel=True)
+def _repeat_feature_recursion(features: np.ndarray, adj_dict: nb.typed.Dict, columns2keep: nb.typed.Dict):
+    num_nodes = features.shape[0]
+    for step, cols2keep in columns2keep.items():
+        num_new_features = 2 * features.shape[1]
+        new_features = np.zeros((num_nodes, num_new_features))
+
+        for v in nb.prange(num_nodes):
+            num_neigh = len(adj_dict[v])
+            if num_neigh == 0:
+                continue
+            new_features[v] = np.concatenate((np.sum(features[adj_dict[v], :], axis=0) / num_neigh,
+                                              np.sum(features[adj_dict[v], :], axis=0)))
+        new_features = new_features / np.sqrt(np.sum(np.power(new_features, 2), axis=0))
+
+        features = np.concatenate((features, new_features), axis=1)
+
+        features = features[:, cols2keep]
     return features
