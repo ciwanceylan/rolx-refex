@@ -64,6 +64,15 @@ def do_feature_recursion(features: np.ndarray, adj_dict: nb.typed.Dict, max_step
     return features, columns2keep
 
 
+@nb.jit(nb.float64[:](nb.float64[:, :]), nopython=True, nogil=True, parallel=True)
+def nb_max(array):
+    out = np.zeros(array.shape[0])
+    for i in nb.prange(array.shape[0]):
+        out[i] = np.max(array[i])
+
+    return out
+
+
 with warnings.catch_warnings():
     # Ignore type safety caused by casting uint64 to int64
     warnings.simplefilter('ignore', category=nb.NumbaTypeSafetyWarning)
@@ -82,7 +91,7 @@ with warnings.catch_warnings():
             new_features = np.zeros((num_nodes, num_new_features))
 
             for v in nb.prange(num_nodes):
-                num_neigh = len(adj_dict[v])  # TODO This raises NumbaTypeSafetyWarning. Not sure how to fix.
+                num_neigh = len(adj_dict[v])
                 if num_neigh == 0:
                     continue
                 new_features[v] = np.concatenate((np.sum(features[adj_dict[v], :], axis=0) / num_neigh,
@@ -92,7 +101,10 @@ with warnings.catch_warnings():
             features = np.concatenate((features, new_features), axis=1)
             _, r = np.linalg.qr(features)
             dependence_coeff = np.abs(np.diag(r))
-            keep_columns = dependence_coeff > tol * dependence_coeff.max()
+            thresholds = tol * nb_max(np.abs(r).T)
+            # thresholds = tol * dependence_coeff.max()
+
+            keep_columns = dependence_coeff > thresholds
             if np.all(keep_columns[-num_new_features:] == 0):
                 features = features[:, :-num_new_features]
                 break  # Break if no new features are added, keeping only the previous features
